@@ -74,10 +74,17 @@ class MakeCoaddTempExpConfig(CoaddBaseTask.ConfigClass):
         dtype=bool,
         default=False,
     )
+
     doWriteEmptyWarps = pexConfig.Field(
         dtype=bool,
         default=False,
         doc="Write out warps even if they are empty"
+    )
+
+    fakesAdded = pexConfig.Field(
+        doc="Have fakes been added?",
+        dtype=bool,
+        default=False,
     )
     doApplySkyCorr = pexConfig.Field(dtype=bool, default=False, doc="Apply sky correction?")
 
@@ -290,11 +297,17 @@ class MakeCoaddTempExpTask(CoaddBaseTask):
             primaryWarpDataset = self.getTempExpDatasetName("direct")
 
         calExpRefList = self.selectExposures(patchRef, skyInfo, selectDataList=selectDataList)
+
+        if self.config.fakesAdded:
+            self.calexpType = "fakes_calexp"
+        else:
+            self.calexpType = "calexp"
+
         if len(calExpRefList) == 0:
             self.log.warn("No exposures to coadd for patch %s", patchRef.dataId)
             return None
         self.log.info("Selected %d calexps for patch %s", len(calExpRefList), patchRef.dataId)
-        calExpRefList = [calExpRef for calExpRef in calExpRefList if calExpRef.datasetExists("calexp")]
+        calExpRefList = [calExpRef for calExpRef in calExpRefList if calExpRef.datasetExists(self.calexpType)]
         self.log.info("Processing %d existing calexps for patch %s", len(calExpRefList), patchRef.dataId)
 
         groupData = groupPatchExposures(patchRef, calExpRefList, self.getCoaddDatasetName(),
@@ -334,7 +347,8 @@ class MakeCoaddTempExpTask(CoaddBaseTask):
                     # We augment the dataRef here with the tract, which is harmless for loading things
                     # like calexps that don't need the tract, and necessary for meas_mosaic outputs,
                     # which do.
-                    calExpRef = calExpRef.butlerSubset.butler.dataRef("calexp", dataId=calExpRef.dataId,
+                    calExpRef = calExpRef.butlerSubset.butler.dataRef(self.calexpType,
+                                                                      dataId=calExpRef.dataId,
                                                                       tract=skyInfo.tractInfo.getId())
                     calExp = self.getCalibratedExposure(calExpRef, bgSubtracted=self.config.bgSubtracted)
                 except Exception as e:
@@ -476,7 +490,7 @@ class MakeCoaddTempExpTask(CoaddBaseTask):
         Exposure's own PhotoCalib and have the original SkyWcs.
         """
         try:
-            exposure = dataRef.get("calexp", immediate=True)
+            exposure = dataRef.get(self.calexpType, immediate=True)
         except dafPersist.NoResults as e:
             raise MissingExposureError('Exposure not found: %s ' % str(e)) from e
 

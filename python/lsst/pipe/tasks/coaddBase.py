@@ -88,6 +88,12 @@ class CoaddBaseConfig(pexConfig.Config):
         check=lambda x: x % 2 == 1
     )
 
+    addFakes = pexConfig.Field(
+        dtype=bool,
+        doc="Add fakes to the calexp?",
+        default=False,
+    )
+
 
 class CoaddTaskRunner(pipeBase.TaskRunner):
 

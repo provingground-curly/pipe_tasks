@@ -249,6 +249,12 @@ class CalibrateConfig(PipelineTaskConfig):
         scalar=True
     )
 
+    writeExposure = pexConfig.Field(
+        dtype=bool,
+        default=True,
+        doc="Write the calexp?"
+    )
+
     def setDefaults(self):
         super().setDefaults()
         self.quantum.dimensions = ("Instrument", "Visit", "Detector")
@@ -767,7 +773,8 @@ class CalibrateTask(PipelineTask, pipeBase.CmdLineTask):
             if self.config.doWriteMatchesDenormalized:
                 denormMatches = denormalizeMatches(astromMatches, matchMeta)
                 dataRef.put(denormMatches, "srcMatchFull")
-        dataRef.put(exposure, "calexp")
+        if self.config.writeExposure:
+            dataRef.put(exposure, "calexp")
         dataRef.put(background, "calexpBackground")
 
     def getSchemaCatalogs(self):
