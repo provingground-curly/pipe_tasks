@@ -282,7 +282,10 @@ class DetectCoaddSourcesTask(PipelineTask, CmdLineTask):
         packedId, maxBits = butler.registry.packDataId("TractPatchAbstractFilter",
                                                        inputDataIds["exposure"],
                                                        returnMaxBits=True)
-        inputData["idFactory"] = afwTable.IdFactory.makeSource(packedId, 64 - maxBits)
+        inputData["idFactory"] = afwTable.IdFactory.makeSource(
+            packedId,
+            afwTable.IdFactory.computeReservedFromMaxBits(maxBits)
+        )
         inputData["expId"] = packedId
         return self.run(**inputData)
 
@@ -916,7 +919,10 @@ class MeasureMergedCoaddSourcesTask(PipelineTask, CmdLineTask):
         packedId, maxBits = butler.registry.packDataId("TractPatch", outputDataIds["outputSources"],
                                                        returnMaxBits=True)
         inputData['exposureId'] = packedId
-        idFactory = afwTable.IdFactory.makeSource(packedId, 64 - maxBits)
+        idFactory = afwTable.IdFactory.makeSource(
+            packedId,
+            afwTable.IdFactory.computeReservedFromMaxBits(maxBits)
+        )
         # Transform inputCatalog
         table = afwTable.SourceTable.make(self.schema, idFactory)
         sources = afwTable.SourceCatalog(table)

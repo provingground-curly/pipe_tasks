@@ -247,7 +247,10 @@ class MergeDetectionsTask(PipelineTask, CmdLineTask):
         packedId, maxBits = butler.registry.packDataId("TractPatch", outputDataIds['outputCatalog'],
                                                        returnMaxBits=True)
         inputData["skySeed"] = packedId
-        inputData["idFactory"] = afwTable.IdFactory.makeSource(packedId, 64 - maxBits)
+        inputData["idFactory"] = afwTable.IdFactory.makeSource(
+            packedId,
+            afwTable.IdFactory.computeReservedFromMaxBits(maxBits)
+        )
         catalogDict = {dataId['abstract_filter']: cat for dataId, cat in zip(inputDataIds['catalogs'],
                        inputData['catalogs'])}
         inputData['catalogs'] = catalogDict

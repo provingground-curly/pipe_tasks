@@ -133,7 +133,10 @@ class DeblendCoaddSourcesBaseTask(PipelineTask):
     def adaptArgsAndRun(self, inputData, inputDataIds, outputDataIds, butler):
         packedId, maxBits = butler.registry.packDataId("TractPatch", inputDataIds["mergedDetections"],
                                                        returnMaxBits=True)
-        inputData["idFactory"] = afwTable.IdFactory.makeSource(packedId, 64 - maxBits)
+        inputData["idFactory"] = afwTable.IdFactory.makeSource(
+            packedId,
+            afwTable.IdFactory.computeReservedFromMaxBits(maxBits)
+        )
         return self.run(**inputData)
 
     def _makeSourceCatalog(self, mergedDetections, idFactory):
