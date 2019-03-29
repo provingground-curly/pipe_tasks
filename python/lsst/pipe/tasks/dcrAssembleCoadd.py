@@ -112,7 +112,7 @@ class DcrAssembleCoaddConfig(CompareWarpAssembleCoaddConfig):
         dtype=float,
         doc="Maximum relative change of the model allowed between subfilters."
             "Set to zero to disable.",
-        default=4.,
+        default=10.,
     )
     convergenceMaskPlanes = pexConfig.ListField(
         dtype=str,
@@ -731,7 +731,9 @@ class DcrAssembleCoaddTask(CompareWarpAssembleCoaddTask):
             Quality of fit metric for one exposure, within the sub-region.
         """
         convergeMask = exposure.mask.getPlaneBitMask(self.config.convergenceMaskPlanes)
-        templateImage = dcrModels.buildMatchedTemplate(exposure=exposure, order=self.config.imageInterpOrder)
+        templateImage = dcrModels.buildMatchedTemplate(exposure=exposure,
+                                                       order=self.config.imageInterpOrder,
+                                                       splitSubfilters=self.config.splitSubfilters)
         diffVals = np.abs(exposure.image.array - templateImage.array)*significanceImage
         refVals = np.abs(exposure.image.array + templateImage.array)*significanceImage/2.
 
