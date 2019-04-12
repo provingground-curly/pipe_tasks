@@ -1,4 +1,4 @@
-# This file is part of qa explorer
+# This file is part of pipe tasks
 #
 # Developed for the LSST Data Management System.
 # This product includes software developed by the LSST Project
@@ -20,11 +20,10 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 """
-Insert fake sources into calexps
+Insert fakes into deepCoadds
 """
 import galsim
 from astropy.table import Table
-import numpy as np
 
 import lsst.afw.geom as afwGeom
 import lsst.afw.image as afwImage
@@ -32,26 +31,22 @@ import lsst.afw.math as afwMath
 import lsst.pex.config as pexConfig
 import lsst.pipe.base as pipeBase
 
-from .processCcd import ProcessCcdTask, ProcessCcdConfig
-from lsst.qa.explorer.parquetTable import ParquetTable
+from lsst.pipe.base import CmdLineTask
 from lsst.pex.exceptions import LogicError, InvalidParameterError
+from lsst.coadd.utils.coaddDataIdContainer import ExistingCoaddDataIdContainer
+from lsst.geom import SpherePoint, radians, Box2D
+from lsst.sphgeom import ConvexPolygon
 
-__all__ = ["InsertFakeSourcesConfig", "InsertFakeSourcesTask"]
+__all__ = ["InsertFakesConfig", "InsertFakesTask"]
 
 
-class InsertFakeSourcesConfig(ProcessCcdConfig):
+class InsertFakesConfig(pexConfig.Config):
     """Config for inserting fake sources
 
     Notes
     -----
     The default column names are those from the UW sims database.
     """
-
-    useUpdatedCalibs = pexConfig.Field(
-        doc="Use updated calibs and wcs from jointcal?",
-        dtype=bool,
-        default=False,
-    )
 
     raColName = pexConfig.Field(
         doc="RA column name for fake source catalog.",
@@ -145,32 +140,22 @@ class InsertFakeSourcesConfig(ProcessCcdConfig):
         default="static",
     )
 
-    calexpType = pexConfig.Field(
-        doc="What type of image, calexp, deepCoadd or deepCoadd_calexp",
-        dtype=str,
+    calibFluxRadius = pexConfig.Field(
+        doc="Radius for the calib flux (in pixels).",
+        dtype=float,
+        default=12.0,
     )
 
-    fakeTract = pexConfig.Field(
-        doc="Tract that the calexp is in. Static fake catalogs are stored by tract.",
-        dtype=int,
-        default=9813,
-    )
 
-    def setDefaults(self):
-        self.charImage.repair.doCosmicRay = False
-        self.calibrate.doAstrometry = False
-        self.calibrate.writeExposure = False
-        self.charImage.doMeasurePsf = False
+class InsertFakesTask(CmdLineTask):
+    """Insert fake objects into images.
 
-class InsertFakeSourcesTask(ProcessCcdTask):
-    """Insert fake objects into calexps.
-
-    Add fake stars and galaxies to the given calexp, specified in the dataRef. Galaxy parameters are read in
+    Add fake stars and galaxies to the given image, specified in the dataRef. Galaxy parameters are read in
     from the specified file and then modelled using galsim. Re-runs characterize image and calibrate image to
-    give a new background estimation and measurement of the calexp.
+    give a new background estimation and measurement of the image.
 
-    `InsertFakeSourcesTask` has five functions that make images of the fake sources and then add them to the
-    calexp.
+    `InsertFakesTask` has five functions that make images of the fake sources and then add them to the
+    image.
 
     `addPixCoords`
         Use the WCS information to add the pixel coordinates of each source
@@ -178,96 +163,69 @@ class InsertFakeSourcesTask(ProcessCcdTask):
     `mkFakeGalsimGalaxies`
         Use Galsim to make fake double sersic galaxies for each set of galaxy parameters in the input file.
     `mkFakeStars`
-        Use the PSF information from the calexp to make a fake star using the magnitude information from the
+        Use the PSF information from the image to make a fake star using the magnitude information from the
         input file.
     `cleanCat`
         Remove rows of the input fake catalog which have half light radius, of either the bulge or the disk,
         that are 0.
     `addFakeSources`
-        Add the fake sources to the calexp.
+        Add the fake sources to the image.
 
-    Notes
-    -----
-    The ``calexp`` with fake souces added to it is written out as the datatype ``calexp_fakes``.
     """
 
-    _DefaultName = "insertFakeSources"
-    ConfigClass = InsertFakeSourcesConfig
+    _DefaultName = "insertFakes"
+    ConfigClass = InsertFakesConfig
 
     def runDataRef(self, dataRef):
-        """Read in/write out the required data products and add fake sources to the calexp.
+        """Read in/write out the required data products and add fake sources to the deepCoadd.
 
         Parameters
         ----------
         dataRef : `lsst.daf.persistence.butlerSubset.ButlerDataRef`
             Data reference defining the ccd to have fake added to it
             Used to access the following data products:
-                calexp
-                jointcal_wcs
-                jointcal_photoCalib
-
-        Notes
-        -----
-        Uses the calibration and WCS information attached to the calexp for the posistioning and calibration
-        of the sources unless the config option config.useUpdatedCalibs is set then it uses the
-        meas_mosaic/jointCal outputs. The config defualts for the column names in the catalog of fakes are
-        taken from the UW simulations database. Operates on one ccd at a time.
+                deepCoadd
         """
 
-        dataRef.dataId["tract"] = self.config.fakeTract
-        if self.config.fakeType == "snapshot":
-            fakeCat = dataRef.get("fakeSourceCat").toDataFrame()
-            self.calexpType = "calexp"
-            self.fakeSourceCatType = "fakeSourceCat"
-        elif self.config.fakeType == "static":
+        # To do: should it warn when asked to insert variable sources into the coadd
+
+        if self.config.fakeType == "static":
             fakeCat = dataRef.get("deepCoadd_fakeSourceCat").toDataFrame()
-            self.calexpType = self.config.calexpType
             # To do: DM-16254, the read and write of the fake catalogs will be changed once the new pipeline
             # task structure for ref cats is in place.
             self.fakeSourceCatType = "deepCoadd_fakeSourceCat"
         else:
             fakeCat = Table.read(self.config.fakeType).to_pandas()
-            self.calexpType = self.config.calexpType
 
-        calexp = dataRef.get(self.calexpType)
-        if self.config.useUpdatedCalibs and self.calexpType == "calexp":
-            self.log.info("Using updated calibs from meas_mosaic/jointCal")
-            wcs = dataRef.get("jointcal_wcs")
-            photoCalib = dataRef.get("jointcal_photoCalib")
-        else:
-            wcs = calexp.getWcs()
-            photoCalib = calexp.getCalib()
+        coadd = dataRef.get("deepCoadd")
+        wcs = coadd.getWcs()
+        photoCalib = coadd.getCalib()
 
-        calexpWithFakes, fakeCat = self.run(fakeCat, calexp, wcs, photoCalib)
+        imageWithFakes, fakeCat = self.run(fakeCat, coadd, wcs, photoCalib)
 
-        if self.calexpType == "calexp":
-            self.processFakeCalexp(dataRef, calexpWithFakes)
-
-        dataRef.put(calexpWithFakes, "fakes_" + self.calexpType)
-        fakeCat = ParquetTable(dataFrame=fakeCat)
+        dataRef.put(imageWithFakes, "fakes_deepCoadd")
 
     @classmethod
     def _makeArgumentParser(cls):
-        datasetType = pipeBase.ConfigDatasetType(name="calexpType")
         parser = pipeBase.ArgumentParser(name=cls._DefaultName)
-        parser.add_id_argument(name="--id", datasetType=datasetType,
-                               help="data IDs for the data type specified in the calexpType config option,"
-                                    "e.g. --id visit=12345 ccd=1,2^0,3")
+        parser.add_id_argument(name="--id", datasetType="deepCoadd",
+                               help="data IDs for the deepCoadd, e.g. --id tract=12345 patch=1,2 filter=r",
+                               ContainerClass=ExistingCoaddDataIdContainer)
         return parser
 
-    def run(self, fakeCat, calexp, wcs, photoCalib):
-        """Add fake sources to a calexp.
+    def run(self, fakeCat, image, wcs, photoCalib):
+        """Add fake sources to an image.
 
         Parameters
         ----------
         fakeCat : `pandas.core.frame.DataFrame`
-        calexp : `lsst.afw.image.exposure.exposure.ExposureF`
+        image : `lsst.afw.image.exposure.exposure.ExposureF`
         wcs : `lsst.afw.geom.skyWcs.skyWcs.SkyWcs`
         photoCalib : `lsst.afw.image.calib.Calib` or `lsst.afw.image.photoCalib.PhotoCalib`
 
         Returns
         -------
-        calexp : `lsst.afw.image.exposure.exposure.ExposureF`
+        image : `lsst.afw.image.exposure.exposure.ExposureF`
         fakeCat : `pandas.core.frame.DataFrame`
 
         Notes
@@ -278,35 +236,35 @@ class InsertFakeSourcesTask(ProcessCcdTask):
 
         Adds the ``Fake`` mask plane which is then set by `addFakeSources` to mark where fake sources have
         been added. Uses the information in the ``fakeCat`` to make fake galaxies (using galsim) and fake
-        stars, using the PSF models from the PSF information for the calexp. These are then added to the
-        calexp and the calexp with fakes included returned.
+        stars, using the PSF models from the PSF information for the image. These are then added to the
+        image and the image with fakes included returned.
 
         The galsim galaxies are made using a double sersic profile, one for the bulge and one for the disk,
         this is then convolved with the PSF at that point.
         """
 
-        calexp.mask.addMaskPlane("FAKE")
-        self.bitmask = calexp.mask.getPlaneBitMask("FAKE")
+        image.mask.addMaskPlane("FAKE")
+        self.bitmask = image.mask.getPlaneBitMask("FAKE")
         self.log.info("Adding mask plane with bitmask %d" % self.bitmask)
 
         fakeCat = self.addPixCoords(fakeCat, wcs)
         if self.config.cleanCat:
             fakeCat = self.cleanCat(fakeCat)
-        fakeCat = self.trimFakeCat(fakeCat, calexp, wcs)
+        fakeCat = self.trimFakeCat(fakeCat, image, wcs)
 
-        band = calexp.getFilter().getName()
+        band = image.getFilter().getName()
         pixelScale = wcs.getPixelScale().asArcseconds()
-        psf = calexp.getPsf()
+        psf = image.getPsf()
 
         galaxies = (fakeCat["sourceType"] == "galaxy")
-        galImages = self.mkFakeGalsimGalaxies(fakeCat[galaxies], band, photoCalib, pixelScale, psf, calexp)
-        calexp = self.addFakeSources(calexp, galImages, "galaxy")
+        galImages = self.mkFakeGalsimGalaxies(fakeCat[galaxies], band, photoCalib, pixelScale, psf, image)
+        image = self.addFakeSources(image, galImages, "galaxy")
 
         stars = (fakeCat["sourceType"] == "star")
-        starImages = self.mkFakeStars(fakeCat[stars], band, photoCalib, psf, calexp)
-        calexp = self.addFakeSources(calexp, starImages, "star")
+        starImages = self.mkFakeStars(fakeCat[stars], band, photoCalib, psf, image)
+        image = self.addFakeSources(image, starImages, "star")
 
-        return calexp, fakeCat
+        return image, fakeCat
 
     def addPixCoords(self, fakeCat, wcs):
 
@@ -323,13 +281,13 @@ class InsertFakeSourcesTask(ProcessCcdTask):
 
         Notes
         -----
-        The default option is to use the WCS information from the calexp. If the ``useUpdatedCalibs`` config
+        The default option is to use the WCS information from the image. If the ``useUpdatedCalibs`` config
         option is set then it will use the updated WCS from jointCal.
         """
 
         ras = fakeCat[self.config.raColName].values
         decs = fakeCat[self.config.decColName].values
-        skyCoords = [afwGeom.SpherePoint(ra, dec, afwGeom.radians) for (ra, dec) in zip(ras, decs)]
+        skyCoords = [SpherePoint(ra, dec, radians) for (ra, dec) in zip(ras, decs)]
         pixCoords = wcs.skyToPixel(skyCoords)
         xs = [coord.getX() for coord in pixCoords]
         ys = [coord.getY() for coord in pixCoords]
@@ -338,13 +296,13 @@ class InsertFakeSourcesTask(ProcessCcdTask):
 
         return fakeCat
 
-    def trimFakeCat(self, fakeCat, calexp, wcs):
-        """Trim the fake cat to about the size of the input calexp.
+    def trimFakeCat(self, fakeCat, image, wcs):
+        """Trim the fake cat to about the size of the input image.
 
         Parameters
         ----------
         fakeCat : `pandas.core.frame.DataFrame`
-        calexp : `lsst.afw.image.exposure.exposure.ExposureF`
+        image : `lsst.afw.image.exposure.exposure.ExposureF`
         wcs : `lsst.afw.geom.skyWcs.skyWcs.SkyWcs`
 
         Returns
@@ -356,49 +314,27 @@ class InsertFakeSourcesTask(ProcessCcdTask):
         There is probably a better way to do this but it will be replaced once the new pipeline task ref
         cats implementation is done. To do: DM-16254
         """
-        calexpShape = calexp.getDimensions()
-        minX = 0
-        minY = 0
-        maxX = calexpShape[0]
-        maxY = calexpShape[1]
 
-        if self.calexpType == "deepCoadd_calexp" or self.calexpType == "deepCoadd":
-            minX += calexp.getXY0().getX()
-            maxX += calexp.getXY0().getX()
-            minY += calexp.getXY0().getY()
-            maxY += calexp.getXY0().getY()
+        bbox = Box2D(image.getBBox())
+        corners = bbox.getCorners()
 
-        minRa, minDec = wcs.pixelToSky(minX, minY)
-        maxRa, maxDec = wcs.pixelToSky(maxX, maxY)
-        minRa = minRa.asRadians()
-        maxRa = maxRa.asRadians()
-        minDec = minDec.asRadians()
-        maxDec = maxDec.asRadians()
+        skyCorners = wcs.pixelToSky(corners)
+        region = ConvexPolygon([s.getVector() for s in skyCorners])
 
-        if minRa > maxRa:
-            maxRa, minRa = minRa, maxRa
-        if minDec > maxDec:
-            maxDec, minDec = minDec, maxDec
+        def trim(row):
+            coord = SpherePoint(row[self.config.raColName], row[self.config.decColName], radians)
+            return region.contains(coord.getVector())
 
-        padding = 20
-        padding = padding * np.pi / (180 * 3600)
-        onCalexp = ((fakeCat[self.config.raColName] - padding > minRa) &
-                    (fakeCat[self.config.raColName] + padding < maxRa) &
-                    (fakeCat[self.config.decColName] - padding > minDec) &
-                    (fakeCat[self.config.decColName] + padding < maxDec))
+        return fakeCat[fakeCat.apply(trim, axis=1)]
 
-        fakeCat = fakeCat[onCalexp]
-
-        return fakeCat
-
-    def mkFakeGalsimGalaxies(self, fakeCat, band, photoCalib, pixelScale, psf, calexp):
+    def mkFakeGalsimGalaxies(self, fakeCat, band, photoCalib, pixelScale, psf, image):
         """Make images of fake galaxies using GalSim.
 
         Parameters
         ----------
         fakeCat : `pandas.core.frame.DataFrame`
         band : `str`
-        photoCalib : `lsst.afw.image.calib.Calib` or `lsst.afw.image.photoCalib.PhotoCalib`
+        photoCalib : `lsst.afw.image.photoCalib.PhotoCalib`
         pixelScale : `float`
         psf : `lsst.meas.extensions.psfex.psfexPsf.PsfexPsf`
 
@@ -409,12 +345,10 @@ class InsertFakeSourcesTask(ProcessCcdTask):
 
         Notes
         -----
-        Currently the updated photoCalib from jointCal/meas_mosaic is a different type to the calib attached
-        to the calexp.
 
         Fake galaxies are made by combining two sersic profiles, one for the bulge and one for the disk. Each
         component has an individual sersic index (n), a, b and position angle (PA). The combined profile is
-        then convolved with the PSF at the specified x, y position on the calexp.
+        then convolved with the PSF at the specified x, y position on the image.
 
         The names of the columns in the ``fakeCat`` are configurable and are the column names from the UW
         simulations database as default. For more information see the doc strings attached to the config
@@ -426,16 +360,11 @@ class InsertFakeSourcesTask(ProcessCcdTask):
         self.log.info("Making %d fake galaxy images" % len(fakeCat))
 
         for (index, row) in fakeCat.iterrows():
-            # jointCal photoCalib and normal photoCalib have different ways of doing this.
             xy = afwGeom.Point2D(row["x"], row["y"])
-            if self.config.useUpdatedCalibs and self.calexpType == "calexp":
-                # This should go away when this is switched to reference catalogs
-                try:
-                    flux = photoCalib.magnitudeToInstFlux(row[self.config.magVar % band], xy)
-                except LogicError:
-                    flux = 0
-            else:
-                flux = photoCalib.getFlux(row[self.config.magVar % band])
+            try:
+                flux = photoCalib.magnitudeToInstFlux(row[self.config.magVar % band], xy)
+            except LogicError:
+                flux = 0
 
             bulge = galsim.Sersic(row[self.config.nBulge], half_light_radius=row[self.config.bulgeHLR])
             axisRatioBulge = row[self.config.bBulge]/row[self.config.aBulge]
@@ -449,7 +378,10 @@ class InsertFakeSourcesTask(ProcessCcdTask):
             gal = gal.withFlux(flux)
 
             try:
+                correctedFlux = psf.computeApertureFlux(self.config.calibFluxRadius, xy)
                 psfKernel = psf.computeKernelImage(xy).getArray()
+                psfKernel *= correctedFlux
+
             except InvalidParameterError:
                 self.log.info("Galaxy at %0.4f, %0.4f outside of image" % (row["x"], row["y"]))
                 continue
@@ -464,7 +396,7 @@ class InsertFakeSourcesTask(ProcessCcdTask):
 
         return galImages
 
-    def mkFakeStars(self, fakeCat, band, photoCalib, psf, calexp):
+    def mkFakeStars(self, fakeCat, band, photoCalib, psf, image):
 
         """Make fake stars based off the properties in the fakeCat.
 
@@ -486,19 +418,16 @@ class InsertFakeSourcesTask(ProcessCcdTask):
         self.log.info("Making %d fake star images" % len(fakeCat))
 
         for (index, row) in fakeCat.iterrows():
-            # jointCal photoCalib and normal photoCalib have different ways of doing this.
             xy = afwGeom.Point2D(row["x"], row["y"])
-            if self.config.useUpdatedCalibs and self.calexpType == "calexp":
-                # This should go away when this is switched to reference catalogs
-                try:
-                    flux = photoCalib.magnitudeToInstFlux(row[band + "magVar"], xy)
-                except LogicError:
-                    flux = 0
-            else:
-                flux = photoCalib.getFlux(row[band + "magVar"])
+            try:
+                flux = photoCalib.magnitudeToInstFlux(row[band + "magVar"], xy)
+            except LogicError:
+                flux = 0
 
             try:
+                correctedFlux = psf.computeApertureFlux(self.config.calibFluxRadius, xy)
                 starIm = psf.computeImage(xy)
+                starIm *= correctedFlux
 
             except InvalidParameterError:
                 self.log.info("Star at %0.4f, %0.4f outside of image" % (row["x"], row["y"]))
@@ -528,19 +457,19 @@ class InsertFakeSourcesTask(ProcessCcdTask):
 
         return fakeCat[goodRows]
 
-    def addFakeSources(self, calexp, fakeImages, sourceType):
-        """Add the fake sources to the given calexp
+    def addFakeSources(self, image, fakeImages, sourceType):
+        """Add the fake sources to the given image
 
         Parameters
         ----------
         fakeCat : `pandas.core.frame.DataFrame`
-        calexp : `lsst.afw.image.exposure.exposure.ExposureF`
+        image : `lsst.afw.image.exposure.exposure.ExposureF`
         fakeImages : `list`
             A list of `lsst.afw.image.image.image.ImageF`
 
         Returns
         -------
-        calexp : `lsst.afw.image.exposure.exposure.ExposureF`
+        image : `lsst.afw.image.exposure.exposure.ExposureF`
 
         Notes
         -----
@@ -548,8 +477,8 @@ class InsertFakeSourcesTask(ProcessCcdTask):
         pixel grid of the image. Sets the ``FAKE`` mask plane for the pixels added with the fake source.
         """
 
-        calexpBBox = calexp.getBBox()
-        calexpMI = calexp.maskedImage
+        imageBBox = image.getBBox()
+        imageMI = image.maskedImage
 
         for (fakeImage, xy) in fakeImages:
             X0 = xy.getX() - fakeImage.getWidth()/2 + 0.5
@@ -562,36 +491,13 @@ class InsertFakeSourcesTask(ProcessCcdTask):
                 interpFakeImage = fakeImage
                 interpFakeImBBox = fakeImage.getBBox()
 
-            interpFakeImBBox.clip(calexpBBox)
-            calexpMIView = calexpMI.Factory(calexpMI, interpFakeImBBox)
+            interpFakeImBBox.clip(imageBBox)
+            imageMIView = imageMI.Factory(imageMI, interpFakeImBBox)
 
             if interpFakeImBBox.getArea() > 0:
                 clippedFakeImage = interpFakeImage.Factory(interpFakeImage, interpFakeImBBox)
                 clippedFakeImageMI = afwImage.MaskedImageF(clippedFakeImage)
                 clippedFakeImageMI.mask.set(self.bitmask)
-                calexpMIView += clippedFakeImageMI
+                imageMIView += clippedFakeImageMI
 
-        return calexp
-
-    def processFakeCalexp(self, dataRef, calexp):
-        """Process the calexp now that fakes have been added.
-
-        Parameters
-        ----------
-        dataRef : `lsst.daf.persistence.butlerSubset.ButlerDataRef`
-        calexp : `lsst.afw.image.exposure.exposure.ExposureF`
-
-        Notes
-        -----
-        Overwrites the data productsproduced by processCcd except for the calexp. Background subtraction is
-        redone.
-        """
-
-        self.log.info("Processing %s" % (dataRef.dataId))
-
-        charRes = self.charImage.runDataRef(dataRef=dataRef, exposure=calexp, doUnpersist=False)
-        exposure = charRes.exposure
-
-        if self.config.doCalibrate:
-            self.calibrate.runDataRef(dataRef=dataRef, exposure=exposure, doUnpersist=False,
-                                      background=charRes.background, icSourceCat=charRes.sourceCat)
+        return image
