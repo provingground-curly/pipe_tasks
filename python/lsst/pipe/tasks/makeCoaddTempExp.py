@@ -81,8 +81,8 @@ class MakeCoaddTempExpConfig(CoaddBaseTask.ConfigClass):
         doc="Write out warps even if they are empty"
     )
 
-    fakesAdded = pexConfig.Field(
-        doc="Have fakes been added?",
+    hasFakes = pexConfig.Field(
+        doc="Should be set to True if fakes ources have been inserted into the input data.",
         dtype=bool,
         default=False,
     )
@@ -298,7 +298,7 @@ class MakeCoaddTempExpTask(CoaddBaseTask):
 
         calExpRefList = self.selectExposures(patchRef, skyInfo, selectDataList=selectDataList)
 
-        if self.config.fakesAdded:
+        if self.config.hasFakes:
             self.calexpType = "fakes_calexp"
         else:
             self.calexpType = "calexp"

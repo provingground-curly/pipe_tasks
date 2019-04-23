@@ -31,7 +31,7 @@ import lsst.afw.math as afwMath
 import lsst.pex.config as pexConfig
 import lsst.pipe.base as pipeBase
 
-from lsst.pipe.base import CmdLineTask
+from lsst.pipe.base import CmdLineTask, PipelineTask, PipelineTaskConfig
 from lsst.pex.exceptions import LogicError, InvalidParameterError
 from lsst.coadd.utils.coaddDataIdContainer import ExistingCoaddDataIdContainer
 from lsst.geom import SpherePoint, radians, Box2D
@@ -40,40 +40,40 @@ from lsst.sphgeom import ConvexPolygon
 __all__ = ["InsertFakesConfig", "InsertFakesTask"]
 
 
-class InsertFakesConfig(pexConfig.Config):
+class InsertFakesConfig(PipelineTaskConfig):
     """Config for inserting fake sources
 
     Notes
     -----
-    The default column names are those from the UW sims database.
+    The default column names are those from the University of Washington sims database.
     """
 
     raColName = pexConfig.Field(
-        doc="RA column name for fake source catalog.",
+        doc="RA column name used in the fake source catalog.",
         dtype=str,
         default="raJ2000",
     )
 
     decColName = pexConfig.Field(
-        doc="Dec. column name for fake source catalog.",
+        doc="Dec. column name used in the fake source catalog.",
         dtype=str,
         default="decJ2000",
     )
 
-    cleanCat = pexConfig.Field(
-        doc="Removed bad sources from the catalog?",
+    doCleanCat = pexConfig.Field(
+        doc="If true removes bad sources from the catalog.",
         dtype=bool,
         default=True,
     )
 
     diskHLR = pexConfig.Field(
-        doc="Column name for the disk half light radius",
+        doc="Column name for the disk half light radius used in the fake source catalog.",
         dtype=str,
         default="DiskHalfLightRadius",
     )
 
     bulgeHLR = pexConfig.Field(
-        doc="Column name for the bulge half light radius",
+        doc="Column name for the bulge half light radius used in the fake source catalog.",
         dtype=str,
         default="BulgeHalfLightRadius",
     )
@@ -86,19 +86,20 @@ class InsertFakesConfig(pexConfig.Config):
     )
 
     nDisk = pexConfig.Field(
-        doc="The column name for the sersic index of the disk component.",
+        doc="The column name for the sersic index of the disk component used in the fake source catalog.",
         dtype=str,
         default="disk_n",
     )
 
     nBulge = pexConfig.Field(
-        doc="The column name for the sersic index of the bulge component.",
+        doc="The column name for the sersic index of the bulge component used in the fake source catalog.",
         dtype=str,
         default="bulge_n",
     )
 
     aDisk = pexConfig.Field(
-        doc="The column name for the semi major axis length of the disk component.",
+        doc="The column name for the semi major axis length of the disk component used in the fake source"
+            "catalog.",
         dtype=str,
         default="a_d",
     )
@@ -116,26 +117,28 @@ class InsertFakesConfig(pexConfig.Config):
     )
 
     bBulge = pexConfig.Field(
-        doc="The column name for the semi minor axis length of the bulge component.",
+        doc="The column name for the semi minor axis length of the bulge component used in the fake source "
+            "catalog.",
         dtype=str,
         default="b_b",
     )
 
     paDisk = pexConfig.Field(
-        doc="The column name for the PA of the disk component.",
+        doc="The column name for the PA of the disk component used in the fake source catalog.",
         dtype=str,
         default="pa_disk",
     )
 
     paBulge = pexConfig.Field(
-        doc="The column name for the PA of the bulge component.",
+        doc="The column name for the PA of the bulge component used in the fake source catalog.",
         dtype=str,
         default="pa_bulge",
     )
 
     fakeType = pexConfig.Field(
-        doc="What type of fake catalog to use, snapshot (includes variables), static or fiilename of user"
-            "defined catalog.",
+        doc="What type of fake catalog to use, snapshot (includes variability in the magnitudes calculated "
+            "from the MJD of the image), static (no variability) or filename for a user defined fits"
+            "catalog.",
         dtype=str,
         default="static",
     )
@@ -146,20 +149,47 @@ class InsertFakesConfig(pexConfig.Config):
         default=12.0,
     )
 
+    image = pipeBase.InputDatasetField(
+        doc="Image into which fakes are to be added.",
+        nameTemplate="{CoaddName}Coadd",
+        scalar=True,
+        storageClass="ExposureF",
+        dimensions=("Tract", "Patch", "AbstractFilter", "SkyMap")
+    )
 
-class InsertFakesTask(CmdLineTask):
+    fakeCat = pipeBase.InputDatasetField(
+        doc="Catalog of fake sources to draw inputs from.",
+        nameTemplate="{CoaddName}Coadd_fakeSourceCat",
+        scalar=True,
+        storageClass="Parquet",
+        dimensions=("Tract", "SkyMap")
+    )
+
+    imageWithFakes = pipeBase.OutputDatasetField(
+        doc="Image with fake sources added.",
+        nameTemplate="fakes_{CoaddName}Coadd",
+        scalar=True,
+        storageClass="ExposureF",
+        dimensions=("Tract", "Patch", "AbstractFilter", "SkyMap")
+    )
+
+    def setDefaults(self):
+        super().setDefaults()
+        self.quantum.dimensions = ("Tract", "Patch", "AbstractFilter", "SkyMap")
+        self.formatTemplateNames({"CoaddName": "deep"})
+
+
+class InsertFakesTask(PipelineTask, CmdLineTask):
     """Insert fake objects into images.
 
-    Add fake stars and galaxies to the given image, specified in the dataRef. Galaxy parameters are read in
-    from the specified file and then modelled using galsim. Re-runs characterize image and calibrate image to
-    give a new background estimation and measurement of the image.
+    Add fake stars and galaxies to the given image, read in through the dataRef. Galaxy parameters are read in
+    from the specified file and then modelled using galsim.
 
     `InsertFakesTask` has five functions that make images of the fake sources and then add them to the
     image.
 
     `addPixCoords`
-        Use the WCS information to add the pixel coordinates of each source
-        Adds an ``x`` and ``y`` column to the catalog of fake sources.
+        Use the WCS information to add the pixel coordinates of each source.
     `mkFakeGalsimGalaxies`
         Use Galsim to make fake double sersic galaxies for each set of galaxy parameters in the input file.
     `mkFakeStars`
@@ -182,7 +212,7 @@ class InsertFakesTask(CmdLineTask):
         Parameters
         ----------
         dataRef : `lsst.daf.persistence.butlerSubset.ButlerDataRef`
-            Data reference defining the ccd to have fake added to it
+            Data reference defining the image to have fakes added to it
             Used to access the following data products:
                 deepCoadd
         """
@@ -201,9 +231,15 @@ class InsertFakesTask(CmdLineTask):
         wcs = coadd.getWcs()
         photoCalib = coadd.getCalib()
 
-        imageWithFakes, fakeCat = self.run(fakeCat, coadd, wcs, photoCalib)
+        imageWithFakes = self.run(fakeCat, coadd, wcs, photoCalib)
 
         dataRef.put(imageWithFakes, "fakes_deepCoadd")
+
+    def adaptArgsAndRun(self, inputData, inputDataIds, outputDataIds, butler):
+        inputData["wcs"] = inputData["image"].getWcs()
+        inputData["photoCalib"] = inputData["image"].getCalib()
+
+        return self.run(**inputData)
 
     @classmethod
     def _makeArgumentParser(cls):
@@ -219,9 +255,13 @@ class InsertFakesTask(CmdLineTask):
         Parameters
         ----------
         fakeCat : `pandas.core.frame.DataFrame`
+                    The catalog of fake sources to be input
         image : `lsst.afw.image.exposure.exposure.ExposureF`
+                    The image into which the fake sources should be added
         wcs : `lsst.afw.geom.skyWcs.skyWcs.SkyWcs`
-        photoCalib : `lsst.afw.image.calib.Calib` or `lsst.afw.image.photoCalib.PhotoCalib`
+                    WCS to use to add fake sources
+        photoCalib : `lsst.afw.image.photoCalib.PhotoCalib`
+                    Photometric calibration to be used to calibrate the fake sources
 
         Returns
         -------
@@ -231,13 +271,12 @@ class InsertFakesTask(CmdLineTask):
         Notes
         -----
         Adds pixel coordinates for each source to the fakeCat and removes objects with bulge or disk half
-        light radius = 0 (if ``config.cleanCat = True``). These columns are called ``x`` and ``y`` and are in
-        pixels.
+        light radius = 0 (if ``config.doCleanCat = True``).
 
-        Adds the ``Fake`` mask plane which is then set by `addFakeSources` to mark where fake sources have
-        been added. Uses the information in the ``fakeCat`` to make fake galaxies (using galsim) and fake
-        stars, using the PSF models from the PSF information for the image. These are then added to the
-        image and the image with fakes included returned.
+        Adds the ``Fake`` mask plane to the image which is then set by `addFakeSources` to mark where fake
+        sources have been added. Uses the information in the ``fakeCat`` to make fake galaxies (using galsim)
+        and fake stars, using the PSF models from the PSF information for the image. These are then added to
+        the image and the image with fakes included returned.
 
         The galsim galaxies are made using a double sersic profile, one for the bulge and one for the disk,
         this is then convolved with the PSF at that point.
@@ -248,7 +287,7 @@ class InsertFakesTask(CmdLineTask):
         self.log.info("Adding mask plane with bitmask %d" % self.bitmask)
 
         fakeCat = self.addPixCoords(fakeCat, wcs)
-        if self.config.cleanCat:
+        if self.config.doCleanCat:
             fakeCat = self.cleanCat(fakeCat)
         fakeCat = self.trimFakeCat(fakeCat, image, wcs)
 
@@ -264,7 +303,7 @@ class InsertFakesTask(CmdLineTask):
         starImages = self.mkFakeStars(fakeCat[stars], band, photoCalib, psf, image)
         image = self.addFakeSources(image, starImages, "star")
 
-        return image, fakeCat
+        return image
 
     def addPixCoords(self, fakeCat, wcs):
 
@@ -273,7 +312,9 @@ class InsertFakesTask(CmdLineTask):
         Parameters
         ----------
         fakeCat : `pandas.core.frame.DataFrame`
+                    The catalog of fake sources to be input
         wcs : `lsst.afw.geom.skyWcs.skyWcs.SkyWcs`
+                    WCS to use to add fake sources
 
         Returns
         -------
@@ -302,17 +343,16 @@ class InsertFakesTask(CmdLineTask):
         Parameters
         ----------
         fakeCat : `pandas.core.frame.DataFrame`
+                    The catalog of fake sources to be input
         image : `lsst.afw.image.exposure.exposure.ExposureF`
+                    The image into which the fake sources should be added
         wcs : `lsst.afw.geom.skyWcs.skyWcs.SkyWcs`
+                    WCS to use to add fake sources
 
         Returns
         -------
         fakeCat : `pandas.core.frame.DataFrame`
-
-        Notes
-        -----
-        There is probably a better way to do this but it will be replaced once the new pipeline task ref
-        cats implementation is done. To do: DM-16254
+                    The original fakeCat trimmed to the area of the image
         """
 
         bbox = Box2D(image.getBBox())
@@ -332,16 +372,20 @@ class InsertFakesTask(CmdLineTask):
 
         Parameters
         ----------
-        fakeCat : `pandas.core.frame.DataFrame`
         band : `str`
-        photoCalib : `lsst.afw.image.photoCalib.PhotoCalib`
         pixelScale : `float`
         psf : `lsst.meas.extensions.psfex.psfexPsf.PsfexPsf`
+                    The PSF information to use to make the PSF images
+        fakeCat : `pandas.core.frame.DataFrame`
+                    The catalog of fake sources to be input
+        photoCalib : `lsst.afw.image.photoCalib.PhotoCalib`
+                    Photometric calibration to be used to calibrate the fake sources
 
         Returns
         -------
         galImages : `list`
-            A list of `lsst.afw.image.exposure.exposure.ExposureF`
+                    A list of tuples of `lsst.afw.image.exposure.exposure.ExposureF` and
+                    `lsst.afw.geom.Point2D` of their locations.
 
         Notes
         -----
@@ -350,9 +394,9 @@ class InsertFakesTask(CmdLineTask):
         component has an individual sersic index (n), a, b and position angle (PA). The combined profile is
         then convolved with the PSF at the specified x, y position on the image.
 
-        The names of the columns in the ``fakeCat`` are configurable and are the column names from the UW
-        simulations database as default. For more information see the doc strings attached to the config
-        options.
+        The names of the columns in the ``fakeCat`` are configurable and are the column names from the
+        University of Washington simulations database as default. For more information see the doc strings
+        attached to the config options.
         """
 
         galImages = []
@@ -361,6 +405,16 @@ class InsertFakesTask(CmdLineTask):
 
         for (index, row) in fakeCat.iterrows():
             xy = afwGeom.Point2D(row["x"], row["y"])
+
+            try:
+                correctedFlux = psf.computeApertureFlux(self.config.calibFluxRadius, xy)
+                psfKernel = psf.computeKernelImage(xy).getArray()
+                psfKernel /= correctedFlux
+
+            except InvalidParameterError:
+                self.log.info("Galaxy at %0.4f, %0.4f outside of image" % (row["x"], row["y"]))
+                continue
+
             try:
                 flux = photoCalib.magnitudeToInstFlux(row[self.config.magVar % band], xy)
             except LogicError:
@@ -377,14 +431,6 @@ class InsertFakesTask(CmdLineTask):
             gal = disk + bulge
             gal = gal.withFlux(flux)
 
-            try:
-                correctedFlux = psf.computeApertureFlux(self.config.calibFluxRadius, xy)
-                psfKernel = psf.computeKernelImage(xy).getArray()
-                psfKernel *= correctedFlux
-
-            except InvalidParameterError:
-                self.log.info("Galaxy at %0.4f, %0.4f outside of image" % (row["x"], row["y"]))
-                continue
             psfIm = galsim.InterpolatedImage(galsim.Image(psfKernel), scale=pixelScale)
             gal = galsim.Convolve([gal, psfIm])
             try:
@@ -402,15 +448,21 @@ class InsertFakesTask(CmdLineTask):
 
         Parameters
         ----------
-        fakeCat : `pandas.core.frame.DataFrame`
         band : `str`
-        photoCalib : `lsst.afw.image.calib.Calib` or `lsst.afw.image.photoCalib.PhotoCalib`
         psf : `lsst.meas.extensions.psfex.psfexPsf.PsfexPsf`
+                    The PSF information to use to make the PSF images
+        fakeCat : `pandas.core.frame.DataFrame`
+                    The catalog of fake sources to be input
+        image : `lsst.afw.image.exposure.exposure.ExposureF`
+                    The image into which the fake sources should be added
+        photoCalib : `lsst.afw.image.photoCalib.PhotoCalib`
+                    Photometric calibration to be used to calibrate the fake sources
 
         Returns
         -------
         starImages : `list`
-            A list of `lsst.afw.image.image.image.ImageF` of fake stars
+                    A list of tuples of `lsst.afw.image.image.image.ImageF` of fake stars and
+                    `lsst.afw.geom.Point2D` of their locations.
         """
 
         starImages = []
@@ -419,19 +471,20 @@ class InsertFakesTask(CmdLineTask):
 
         for (index, row) in fakeCat.iterrows():
             xy = afwGeom.Point2D(row["x"], row["y"])
-            try:
-                flux = photoCalib.magnitudeToInstFlux(row[band + "magVar"], xy)
-            except LogicError:
-                flux = 0
 
             try:
                 correctedFlux = psf.computeApertureFlux(self.config.calibFluxRadius, xy)
                 starIm = psf.computeImage(xy)
-                starIm *= correctedFlux
+                starIm /= correctedFlux
 
             except InvalidParameterError:
                 self.log.info("Star at %0.4f, %0.4f outside of image" % (row["x"], row["y"]))
                 continue
+
+            try:
+                flux = photoCalib.magnitudeToInstFlux(row[band + "magVar"], xy)
+            except LogicError:
+                flux = 0
 
             starIm *= flux
             starImages.append((starIm.convertF(), xy))
@@ -444,10 +497,12 @@ class InsertFakesTask(CmdLineTask):
         Parameters
         ----------
         fakeCat : `pandas.core.frame.DataFrame`
+                    The catalog of fake sources to be input
 
         Returns
         -------
         fakeCat : `pandas.core.frame.DataFrame`
+                    The input catalog of fake sources but with the bad objects removed
         """
 
         goodRows = ((fakeCat[self.config.bulgeHLR] != 0.0) & (fakeCat[self.config.diskHLR] != 0.0))
@@ -462,10 +517,13 @@ class InsertFakesTask(CmdLineTask):
 
         Parameters
         ----------
-        fakeCat : `pandas.core.frame.DataFrame`
-        image : `lsst.afw.image.exposure.exposure.ExposureF`
         fakeImages : `list`
-            A list of `lsst.afw.image.image.image.ImageF`
+                    A list of tuples of `lsst.afw.image.image.image.ImageF` and `lsst.afw.geom.Point2D,
+                    the images and the locations they are to be inserted at.
+        image : `lsst.afw.image.exposure.exposure.ExposureF`
+                    The image into which the fake sources should be added
+        sourceType : `str`
+                    The type (star/galaxy) of fake sources input
 
         Returns
         -------

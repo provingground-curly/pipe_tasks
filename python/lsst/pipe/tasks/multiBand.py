@@ -114,7 +114,11 @@ class DetectCoaddSourcesConfig(PipelineTaskConfig):
         dimensions=("Tract", "Patch", "AbstractFilter", "SkyMap")
     )
 
-    fakesAdded = Field(dtype=bool, default=False, doc="Have fakes been added?")
+    hasFakes = Field(
+        dtype=bool,
+        default=False,
+        doc="Should be set to True if fake sources have been inserted into the input data."
+    )
 
     def setDefaults(self):
         super().setDefaults()
@@ -274,7 +278,7 @@ class DetectCoaddSourcesTask(PipelineTask, CmdLineTask):
 
         @param[in] patchRef: data reference for patch
         """
-        if self.config.fakesAdded:
+        if self.config.hasFakes:
             exposure = patchRef.get("fakes_" + self.config.coaddName + "Coadd", immediate=True)
         else:
             exposure = patchRef.get(self.config.coaddName + "Coadd", immediate=True)
@@ -334,7 +338,7 @@ class DetectCoaddSourcesTask(PipelineTask, CmdLineTask):
         coaddName = self.config.coaddName + "Coadd"
         patchRef.put(results.outputBackgrounds, coaddName + "_calexp_background")
         patchRef.put(results.outputSources, coaddName + "_det")
-        if self.config.fakesAdded:
+        if self.config.hasFakes:
             patchRef.put(results.outputExposure, "fakes_" + coaddName + "_calexp")
         else:
             patchRef.put(results.outputExposure, coaddName + "_calexp")
@@ -353,7 +357,9 @@ class DeblendCoaddSourcesConfig(Config):
                                          doc="Deblend sources simultaneously across bands")
     simultaneous = Field(dtype=bool, default=False, doc="Simultaneously deblend all bands?")
     coaddName = Field(dtype=str, default="deep", doc="Name of coadd")
-    fakesAdded = Field(dtype=bool, default=False, doc="Have fakes been added?")
+    hasFakes = Field(dtype=bool,
+                     default=False,
+                     doc="Should be set to True if fake sources have been inserted into the input data.")
 
     def setDefaults(self):
         Config.setDefaults(self)
@@ -472,7 +478,7 @@ class DeblendCoaddSourcesTask(CmdLineTask):
             List of data references for each filter
         """
 
-        if self.config.fakesAdded:
+        if self.config.hasFakes:
             coaddType = "fakes_" + self.config.coaddName
         else:
             coaddType = self.config.coaddName
@@ -704,7 +710,11 @@ class MeasureMergedCoaddSourcesConfig(PipelineTaskConfig):
         scalar=True
     )
 
-    fakesAdded = Field(dtype=bool, default=False, doc="Have fakes been added?")
+    hasFakes = Field(
+        dtype=bool,
+        default=False,
+        doc="Should be set to True if fake sources have been inserted into the input data."
+    )
 
     @property
     def refObjLoader(self):
@@ -995,7 +1005,7 @@ class MeasureMergedCoaddSourcesTask(PipelineTask, CmdLineTask):
         from individual visits. Optionally match the sources to a reference catalog and write the matches.
         Finally, write the deblended sources and measurements out.
         """
-        if self.config.fakesAdded:
+        if self.config.hasFakes:
             coaddType = "fakes_" + self.config.coaddName
         else:
             coaddType = self.config.coaddName

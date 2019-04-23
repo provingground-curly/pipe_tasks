@@ -35,12 +35,13 @@ from lsst.meas.base import (SingleFrameMeasurementTask, ApplyApCorrTask, Catalog
 from lsst.meas.deblender import SourceDeblendTask
 from lsst.afw.table import SourceTable, IdFactory
 from lsst.obs.base import ExposureIdInfo
+from lsst.pipe.base import PipelineTask, PipelineTaskConfig, CmdLineTask
 
 
 __all__ = ["ProcessFakesConfig", "ProcessFakesTask"]
 
 
-class ProcessFakesConfig(pexConfig.Config):
+class ProcessFakesConfig(PipelineTaskConfig):
     """Config for inserting fake sources
 
     Notes
@@ -52,6 +53,54 @@ class ProcessFakesConfig(pexConfig.Config):
         doc="Use updated calibs and wcs from jointcal?",
         dtype=bool,
         default=False,
+    )
+
+    exposure = pipeBase.InputDatasetField(
+        doc="Exposure into which fakes are to be added.",
+        name="calexp",
+        scalar=True,
+        storageClass="ExposureF",
+        dimensions=("Instrument", "Visit", "Detector")
+    )
+
+    fakeCat = pipeBase.InputDatasetField(
+        doc="Catalog of fake sources to draw inputs from.",
+        nameTemplate="{CoaddName}Coadd_fakeSourceCat",
+        scalar=True,
+        storageClass="Parquet",
+        dimensions=("Tract", "SkyMap")
+    )
+
+    wcs = pipeBase.InputDatasetField(
+        doc="WCS information for the input exposure.",
+        name="jointcal_wcs",
+        scalar=True,
+        storageClass="TablePersistableWcs",
+        dimensions=("Tract", "SkyMap", "Instrument", "Visit", "Detector")
+    )
+
+    photoCalib = pipeBase.InputDatasetField(
+        doc="Calib information for the input exposure.",
+        name="jointcal_photoCalib",
+        scalar=True,
+        storageClass="TablePersistablePhotoCalib",
+        dimensions=("Tract", "SkyMap", "Instrument", "Visit", "Detector")
+    )
+
+    outputExposure = pipeBase.OutputDatasetField(
+        doc="Exposure with fake sources added.",
+        name="fakes_calexp",
+        scalar=True,
+        storageClass="ExposureF",
+        dimensions=("Instrument", "Visit", "Detector")
+    )
+
+    outputCat = pipeBase.OutputDatasetField(
+        doc="Source catalog produced in calibrate task with fakes also measured.",
+        name="src",
+        storageClass="SourceCatalog",
+        dimensions=("Instrument", "Visit", "Detector"),
+        scalar=True
     )
 
     insertFakes = pexConfig.ConfigurableField(target=InsertFakesTask,
@@ -73,9 +122,11 @@ class ProcessFakesConfig(pexConfig.Config):
 
     def setDefaults(self):
         self.detection.reEstimateBackground = False
+        super().setDefaults()
+        self.quantum.dimensions = ("Instrument", "Visit", "Detector")
 
 
-class ProcessFakesTask(pipeBase.CmdLineTask):
+class ProcessFakesTask(PipelineTask, CmdLineTask):
     """Insert fake objects into calexps.
 
     Add fake stars and galaxies to the given calexp, specified in the dataRef. Galaxy parameters are read in
@@ -130,7 +181,7 @@ class ProcessFakesTask(pipeBase.CmdLineTask):
         Parameters
         ----------
         dataRef : `lsst.daf.persistence.butlerSubset.ButlerDataRef`
-            Data reference defining the ccd to have fake added to it
+            Data reference defining the ccd to have fakes added to it.
             Used to access the following data products:
                 calexp
                 jointcal_wcs
@@ -141,7 +192,7 @@ class ProcessFakesTask(pipeBase.CmdLineTask):
         Uses the calibration and WCS information attached to the calexp for the posistioning and calibration
         of the sources unless the config option config.useUpdatedCalibs is set then it uses the
         meas_mosaic/jointCal outputs. The config defualts for the column names in the catalog of fakes are
-        taken from the UW simulations database. Operates on one ccd at a time.
+        taken from the University of Washington simulations database. Operates on one ccd at a time.
         """
         exposureIdInfo = dataRef.get("expIdInfo")
 
@@ -167,6 +218,21 @@ class ProcessFakesTask(pipeBase.CmdLineTask):
         dataRef.put(resultStruct.outputExposure, "fakes_calexp")
         dataRef.put(resultStruct.outputCat, "fakes_src")
 
+    def adaptArgsAndRun(self, inputData, inputDataIds, outputDataIds, butler):
+        if 'exposureIdInfo' not in inputData.keys():
+            packer = butler.registry.makeDataIdPacker("VisitDetector", inputDataIds['exposure'])
+            exposureIdInfo = ExposureIdInfo()
+            exposureIdInfo.expId = packer.pack(inputDataIds['exposure'])
+            exposureIdInfo.expBits = packer.maxBits
+            inputData['exposureIdInfo'] = exposureIdInfo
+
+        if inputData["wcs"] is None:
+            inputData["wcs"] = inputData["image"].getWcs()
+        if inputData["photoCalib"] is None:
+            inputData["photoCalib"] = inputData["image"].getCalib()
+
+        return self.run(**inputData)
+
     @classmethod
     def _makeArgumentParser(cls):
         parser = pipeBase.ArgumentParser(name=cls._DefaultName)
@@ -181,9 +247,13 @@ class ProcessFakesTask(pipeBase.CmdLineTask):
         Parameters
         ----------
         fakeCat : `pandas.core.frame.DataFrame`
-        calexp : `lsst.afw.image.exposure.exposure.ExposureF`
+                    The catalog of fake sources to add to the exposure
+        exposure : `lsst.afw.image.exposure.exposure.ExposureF`
+                    The exposure to add the fake sources to
         wcs : `lsst.afw.geom.skyWcs.skyWcs.SkyWcs`
+                    WCS to use to add fake sources
         photoCalib : `lsst.afw.image.photoCalib.PhotoCalib`
+                    Photometric calibration to be used to calibrate the fake sources
         exposureIdInfo : `lsst.obs.base.ExposureIdInfo`
 
         Returns
@@ -198,10 +268,10 @@ class ProcessFakesTask(pipeBase.CmdLineTask):
         light radius = 0 (if ``config.cleanCat = True``). These columns are called ``x`` and ``y`` and are in
         pixels.
 
-        Adds the ``Fake`` mask plane which is then set by `addFakeSources` to mark where fake sources have
-        been added. Uses the information in the ``fakeCat`` to make fake galaxies (using galsim) and fake
-        stars, using the PSF models from the PSF information for the calexp. These are then added to the
-        calexp and the calexp with fakes included returned.
+        Adds the ``Fake`` mask plane to the exposure which is then set by `addFakeSources` to mark where fake
+        sources have been added. Uses the information in the ``fakeCat`` to make fake galaxies (using galsim)
+        and fake stars, using the PSF models from the PSF information for the calexp. These are then added to
+        the calexp and the calexp with fakes included returned.
 
         The galsim galaxies are made using a double sersic profile, one for the bulge and one for the disk,
         this is then convolved with the PSF at that point.

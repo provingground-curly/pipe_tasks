@@ -189,10 +189,10 @@ class AssembleCoaddConfig(CoaddBaseTask.ConfigClass, pipeBase.PipelineTaskConfig
         scalar=True
     )
 
-    fakesAdded = pexConfig.Field(
+    hasFakes = pexConfig.Field(
         dtype=bool,
         default=False,
-        doc="Have fakes been added?"
+        doc="Should be set to True if fake sources have been inserted into the input data."
     )
 
     def setDefaults(self):
@@ -525,7 +525,7 @@ class AssembleCoaddTask(CoaddBaseTask, pipeBase.PipelineTask):
 
         self.processResults(retStruct.coaddExposure, dataRef)
         if self.config.doWrite:
-            if self.getCoaddDatasetName(self.warpType) == "deepCoadd" and self.config.fakesAdded:
+            if self.getCoaddDatasetName(self.warpType) == "deepCoadd" and self.config.hasFakes:
                 coaddDatasetName = "fakes_" + self.getCoaddDatasetName(self.warpType)
             else:
                 coaddDatasetName = self.getCoaddDatasetName(self.warpType)

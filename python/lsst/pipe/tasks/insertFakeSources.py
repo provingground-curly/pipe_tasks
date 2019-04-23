@@ -1,4 +1,4 @@
-# This file is part of qa explorer
+# This file is part of pipe tasks
 #
 # Developed for the LSST Data Management System.
 # This product includes software developed by the LSST Project
@@ -583,7 +583,7 @@ class InsertFakeSourcesTask(ProcessCcdTask):
 
         Notes
         -----
-        Overwrites the data productsproduced by processCcd except for the calexp. Background subtraction is
+        Overwrites the data products produced by processCcd except for the calexp. Background subtraction is
         redone.
         """
 
